@@ -6,6 +6,7 @@ import com.github.mim1q.minecells.dimension.MineCellsDimension;
 import com.github.mim1q.minecells.item.MineCellsItemTags;
 import com.github.mim1q.minecells.structure.grid.GridBasedStructureUtils;
 import com.github.mim1q.minecells.structure.grid.SpecialPointIds;
+import com.github.mim1q.minecells.util.FallResetTargets;
 import com.github.mim1q.minecells.util.MathUtils;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.EntityType;
@@ -21,6 +22,7 @@ import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.Heightmap;
 import net.minecraft.world.World;
+import org.jetbrains.annotations.Nullable;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.Unique;
@@ -61,6 +63,9 @@ public abstract class EntityFallResetMixin implements FallResetEntity {
 
   @Unique private Double fallResetY = 0.0;
   @Unique private BlockPos dimensionTpPos = BlockPos.ORIGIN;
+  @Unique private Vec3d resetHoldPos = null;
+  @Unique private int resetWaitTicks = 0;
+  @Unique private static final int MAX_RESET_WAIT_TICKS = 200;
 
   @Inject(
     method = "<init>",
@@ -132,6 +137,17 @@ public abstract class EntityFallResetMixin implements FallResetEntity {
       }
 
       var tpPos = minecells$getResetToPos();
+      if (tpPos == null) {
+        // The target chunk is still loading. Hold the entity in place and try again on the next check.
+        if (resetHoldPos == null) resetHoldPos = getPos();
+        resetWaitTicks += 2;
+        this.teleport(resetHoldPos.x, resetHoldPos.y, resetHoldPos.z);
+        this.setVelocity(Vec3d.ZERO);
+        fallDistance = 0.0f;
+        return;
+      }
+      resetHoldPos = null;
+      resetWaitTicks = 0;
       this.dismountVehicle();
 
       if (this.isPlayer()) {
@@ -165,8 +181,21 @@ public abstract class EntityFallResetMixin implements FallResetEntity {
     tracker.grantCriterion(advancement, "teleported_up");
   }
 
+  /**
+   * @return where to reset the entity to, or null if the target's chunk is still loading in the background
+   */
   @Unique
-  private BlockPos minecells$getResetToPos() {
+  private @Nullable BlockPos minecells$getResetToPos() {
+    var target = FallResetTargets.find((Entity) (Object) this, (ServerWorld) getWorld());
+    if (target != null || resetWaitTicks < MAX_RESET_WAIT_TICKS) {
+      return target;
+    }
+    // Waited too long for the chunk, fall back to looking it up synchronously
+    return minecells$getResetToPosBlocking();
+  }
+
+  @Unique
+  private BlockPos minecells$getResetToPosBlocking() {
     var serverWorld = (ServerWorld) getWorld();
     var dimension = MineCellsDimension.of(getWorld());
     var pos = MathUtils.getClosestMultiplePosition(getBlockPos(), 1024);
